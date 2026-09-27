@@ -1,71 +1,115 @@
 # pika-profiler
 
-Minecraft in-game player intelligence & stats bot cho **Pika-Network** – tự động nhận diện rank, chuẩn hóa username hoa/thường, check BedWars stats qua guild chat với SOCKS5 proxy support.
+An in-game Minecraft player intelligence & BedWars stats bot for **PikaNetwork** built with Node.js and Mineflayer. Automatically detects ranks, resolves player username casing, checks statistics directly via guild chat, and routes connections through SOCKS5 proxies.
 
-## Cài đặt
+---
+
+## Features
+
+- ⚔️ **BedWars Stats Lookup**: Real-time stats retrieval directly inside Minecraft chat (`.stat <username> [mode] [interval]`).
+- 🎨 **Dynamic Rank Colorization**: Automatically detects the player's server/network rank and colorizes their username using in-game hex colors (`Champion`, `Titan`, `Elite`, `VIP`, `Member`).
+- 🔤 **Case-Insensitive Resolution**: Automatically resolves any username casing (e.g. `Zvwgvx` vs `zvwgvx`) to the exact canonical database record.
+- 🛡️ **SOCKS5 Proxy Support**: Built-in SOCKS5 proxy routing with `ip:port:user:pass` authentication and automatic SRV record resolution.
+- 🤖 **Automated Lobby Navigation**: Automatically handles `/login`, switches to the Server Selector, and joins the BedWars lobby upon connecting.
+- ⏱️ **Spam Prevention**: Per-player cooldown to prevent chat flooding and API rate limits.
+
+---
+
+## Installation
 
 ```bash
-# 1. Clone / vào thư mục project
+# 1. Clone repository
+git clone https://github.com/zvwgvx/pika-profiler.git
 cd pika-profiler
 
-# 2. Cài dependencies
+# 2. Install dependencies
 npm install
 
-# 3. Tạo file .env từ mẫu
+# 3. Create configuration file from template
 cp .env.example .env
-# Sau đó mở .env và điền thông tin tài khoản Minecraft của bot
 ```
 
-## Cấu hình `.env`
+---
 
-| Biến | Mô tả | Mặc định |
-|------|-------|---------|
-| `MC_USERNAME` | Username tài khoản bot | *(bắt buộc)* |
-| `SERVER_PASSWORD` | Mật khẩu tài khoản (dùng cho server /login) | *(bắt buộc)* |
-| `MC_AUTH` | `offline` hoặc `microsoft` | `offline` |
-| `MC_HOST` | Host server | `play.pika-network.net` |
-| `MC_PORT` | Port | `25565` |
-| `MC_VERSION` | Phiên bản game | `1.20.1` |
-| `SOCKS5_PROXY` | Proxy SOCKS5 (`ip:port:user:pass` hoặc `ip:port`) | *(tùy chọn)* |
-| `CMD_PREFIX` | Prefix lệnh | `.` |
-| `DEFAULT_INTERVAL` | `total` \| `monthly` \| `weekly` | `total` |
-| `DEFAULT_MODE` | `ALL_MODES` \| `SOLO` \| `DOUBLES` \| `TRIPLES` \| `QUADS` | `ALL_MODES` |
+## Configuration (`.env`)
 
-## Chạy bot
+Edit your `.env` file with your bot credentials:
+
+| Variable | Description | Default |
+|:---|:---|:---|
+| `MC_USERNAME` | Bot account username | *(Required)* |
+| `SERVER_PASSWORD` | Password used for in-game `/login` | *(Required)* |
+| `MC_AUTH` | Authentication mode (`offline` or `microsoft`) | `offline` |
+| `MC_HOST` | Minecraft server host | `play.pika-network.net` |
+| `MC_PORT` | Minecraft server port | `25565` |
+| `MC_VERSION` | Game client version | `1.20.1` |
+| `SOCKS5_PROXY` | SOCKS5 proxy (`ip:port:user:pass` or `ip:port`) | *(Optional)* |
+| `CMD_PREFIX` | Prefix for bot commands | `.` |
+| `DEFAULT_INTERVAL` | Default timeframe (`total` \| `monthly` \| `weekly`) | `total` |
+| `DEFAULT_MODE` | Default game mode (`ALL_MODES` \| `SOLO` \| `DOUBLES` \| `QUADS`) | `ALL_MODES` |
+
+---
+
+## Running the Bot
 
 ```bash
+# Production mode
 npm start
 
-# hoặc chế độ dev (tự restart khi sửa code)
+# Development mode (auto-restart on file changes)
 npm run dev
 ```
 
-## Cách dùng trong Guild Chat
+---
 
-```
-.stat {username} [interval] [mode]
-```
+## In-Game Usage
 
-| Tham số | Giá trị hợp lệ | Ví dụ |
-|---------|---------------|-------|
-| `username` | IGN của người chơi | `Notch` |
-| `interval` | `total` / `monthly` / `weekly` | `monthly` |
-| `mode` | `all` / `solo` / `doubles` / `triples` / `quads` | `solo` |
+Trigger the bot inside guild chat (`/g c`):
 
-### Ví dụ
-
-```
-.stat Notch                    → stats all modes, total
-.stat Notch monthly            → stats all modes, tháng này
-.stat Notch total solo         → stats solo, toàn thời gian
+```text
+.stat <username> [mode] [interval]
 ```
 
-### Output mẫu
+### Parameters
 
+| Argument | Valid Values | Description | Default |
+|:---|:---|:---|:---|
+| `username` | Any player IGN | Target player to inspect | Message sender |
+| `mode` | `1` (Solo), `2` (Doubles), `4` (Quads) | BedWars mode | All modes |
+| `interval` | `week`, `month`, `year` | Stats timeframe | Lifetime (`total`) |
+
+### Examples
+
+```text
+.stat Notch                # All modes, lifetime stats
+.stat Notch 1              # Solo mode, lifetime stats
+.stat Notch 2 month        # Doubles mode, monthly stats
+.stat Notch 4 week         # Quads mode, weekly stats
 ```
-[BW All/Total] Notch | W: 120 L: 45 WLR: 2.67 | K: 890 D: 310 KDR: 2.87 | FK: 200 FD: 60 FKDR: 3.33 | Beds: 180
+
+### Output Preview
+
+```text
+Notch | Doubles Weekly | W: 15 WLR: 7.50 | K: 66 KDR: 4.71 | FK: 64 FKDR: 32.00
 ```
 
-## Cooldown
+- **Player Name**: Rendered in their active rank color (Champion: Red, Titan: Yellow, Elite: Aqua, VIP: Green, Unranked: Gray).
+- **Mode & Interval Tags**: Displayed cleanly only when different from default.
+- **Key Metrics**: Wins (W), Win/Loss Ratio (WLR), Kills (K), Kill/Death Ratio (KDR), Final Kills (FK), Final Kill/Death Ratio (FKDR).
 
-Mỗi người dùng phải chờ **5 giây** giữa các lần dùng `.stat` để tránh spam API.
+---
+
+## Roadmap
+
+- [x] BedWars stats checker with guild chat integration
+- [x] Dynamic rank color detection & hex palette
+- [x] Case-insensitive canonical username resolution
+- [x] SOCKS5 proxy integration with authentication
+- [ ] Denicker (unmasking nicked players using game recaps and skin data)
+- [ ] Alt account detector & history tracking
+
+---
+
+## License
+
+This project is licensed under the MIT License.

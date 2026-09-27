@@ -81,16 +81,16 @@ const C = {
 
 // ─── Rank colors for player names ───────────────────────────────────────────────
 const RANK_CONFIG = {
-  owner:     { priority: 150, color: '&#FF5555' }, // đỏ
-  admin:     { priority: 140, color: '&#FF5555' }, // đỏ
-  developer: { priority: 130, color: '&#FF55FF' }, // tím hồng
-  srmod:     { priority: 120, color: '&#5555FF' }, // xanh dương
-  mod:       { priority: 110, color: '&#55FFFF' }, // xanh aqua
-  helper:    { priority: 105, color: '&#FFFF55' }, // vàng
-  champion:  { priority: 100, color: '&#FF5555' }, // đỏ
-  titan:     { priority: 80,  color: '&#FFFF55' }, // vàng
-  elite:     { priority: 60,  color: '&#55FFFF' }, // xanh aqua
-  vip:       { priority: 40,  color: '&#55FF55' }, // xanh lá
+  owner:     { priority: 150, color: '&#FF5555' }, // red
+  admin:     { priority: 140, color: '&#FF5555' }, // red
+  developer: { priority: 130, color: '&#FF55FF' }, // pink/magenta
+  srmod:     { priority: 120, color: '&#5555FF' }, // blue
+  mod:       { priority: 110, color: '&#55FFFF' }, // aqua
+  helper:    { priority: 105, color: '&#FFFF55' }, // yellow
+  champion:  { priority: 100, color: '&#FF5555' }, // red
+  titan:     { priority: 80,  color: '&#FFFF55' }, // yellow
+  elite:     { priority: 60,  color: '&#55FFFF' }, // aqua
+  vip:       { priority: 40,  color: '&#55FF55' }, // green
 };
 
 /**
