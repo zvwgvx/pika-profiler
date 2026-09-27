@@ -97,6 +97,7 @@ function createBot() {
     username: CONFIG.username,
     auth:     CONFIG.auth,
     version:  CONFIG.version,
+    checkTimeoutInterval: 60 * 1000,
   };
 
   if (CONFIG.socks5Proxy) {
@@ -136,6 +137,15 @@ function createBot() {
 
   const bot = mineflayer.createBot(botOptions);
 
+  // ── Anti-AFK & KeepAlive Heartbeat (keeps proxy socket active) ────────────────
+  const heartbeatTimer = setInterval(() => {
+    if (!botReady || !bot.entity) return;
+    try {
+      const yaw = bot.entity.yaw + (Math.random() * 0.1 - 0.05);
+      bot.look(yaw, bot.entity.pitch, true);
+    } catch (_) {}
+  }, 20000);
+
   // ── Events ────────────────────────────────────────────────────────────────────
   bot.on('login', () => {
     console.log(`[Bot] Connected as ${bot.username}`);
@@ -159,6 +169,7 @@ function createBot() {
   });
 
   bot.on('end', () => {
+    clearInterval(heartbeatTimer);
     console.log('[Bot] Connection ended.');
     botReady = false;
     if (!isBanned) {
