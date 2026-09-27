@@ -290,8 +290,44 @@ async function runLoginSequence(bot) {
       bot.closeWindow(bot.currentWindow);
     }
 
+    console.log('[Nav] Joined BedWars lobby! Waiting for world to settle…');
+    await sleep(4000);
+
+    // ── Navigate to Lobby-1: Hotbar slot 7 -> open menu -> click [2,2] ──
+    console.log('[Nav] Switching to hotbar slot 7 (Lobby Selector)…');
+    bot.setQuickBarSlot(6); // slot 7 = index 6 (0-based)
+
+    await sleep(500);
+    console.log('[Nav] Activating hotbar slot 7…');
+    bot.swingArm('right');
+    bot.activateItem();
+
+    // Wait for Lobby Selector window to open
+    console.log('[Nav] Waiting for Lobby Selector menu…');
+    const lobbyWindow = await waitForWindow(bot, 10000);
+    console.log(`[Nav] Lobby Selector opened: "${lobbyWindow.title}" (${lobbyWindow.slots.length} slots)`);
+
+    for (let i = 0; i < lobbyWindow.slots.length; i++) {
+      const slot = lobbyWindow.slots[i];
+      if (slot) {
+        console.log(`[Nav] Lobby Slot ${i}: ${slot.name} - "${slot.displayName}"`);
+      }
+    }
+
+    // Click slot [2,2] (row 2, col 2) = (2 - 1) * 9 + (2 - 1) = 10 (Lobby-1)
+    const lobbySlotIndex = (2 - 1) * 9 + (2 - 1); // = 10
+    console.log(`[Nav] Clicking slot ${lobbySlotIndex} (row 2, col 2) for Lobby-1…`);
+    await sleep(500);
+    bot.clickWindow(lobbySlotIndex, 0, 0);
+
+    await sleep(3000);
+
+    if (bot.currentWindow) {
+      bot.closeWindow(bot.currentWindow);
+    }
+
     botReady = true;
-    console.log('[Nav] ✅ Joined BedWars! Bot is ready.');
+    console.log('[Nav] ✅ Joined BedWars Lobby-1! Bot is ready.');
   } catch (err) {
     console.error('[Nav] ❌ Navigation failed:', err.message);
     console.log('[Nav] Retrying in 5s…');
