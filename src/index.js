@@ -88,22 +88,84 @@ const COOLDOWN_MS = 5000;
 let currentBot = null;
 let reconnectTimer = null;
 let isNavigating = false;
-let navAttempts = 0;
+let botReady = false;
+let heartbeatTimer = null;
+let watchdogTimer = null;
+let readyTimer = null;
+let lastPacketAt = 0;
+let reconnectFailures = 0;
 const MAX_NAV_ATTEMPTS = 3;
+const MIN_RECONNECT_MS = 10000;
+const MAX_RECONNECT_MS = 300000;
+const PACKET_STALL_MS = 90000;
+const READY_TIMEOUT_MS = 120000;
+
+function clearBotTimers() {
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    if (watchdogTimer) clearInterval(watchdogTimer);
+    if (readyTimer) clearTimeout(readyTimer);
+    heartbeatTimer = null;
+    watchdogTimer = null;
+    readyTimer = null;
+}
+
+function stopCurrentBot() {
+    clearBotTimers();
+    if (!currentBot) {
+        botReady = false;
+        isNavigating = false;
+        return;
+    }
+    const bot = currentBot;
+    currentBot = null;
+    botReady = false;
+    isNavigating = false;
+    try { bot.removeAllListeners(); } catch (_) {}
+    try { bot.end(); } catch (_) {}
+}
+
+function reconnectDelay(baseDelay) {
+    const exponential = MIN_RECONNECT_MS * (2 ** Math.min(reconnectFailures, 5));
+    return Math.min(MAX_RECONNECT_MS, Math.max(baseDelay, exponential)) + Math.floor(Math.random() * 3000);
+}
+
+function scheduleReconnect(baseDelay = MIN_RECONNECT_MS) {
+    if (reconnectTimer) return;
+    const delay = reconnectDelay(baseDelay);
+    reconnectFailures++;
+    console.log(`[Bot] Reconnecting in ${Math.round(delay / 1000)}s…`);
+    reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        console.log('[Bot] Reconnecting now…');
+        createBot();
+    }, delay);
+}
+
+function forceReconnect(bot, reason, baseDelay = MIN_RECONNECT_MS) {
+    if (currentBot !== bot) return;
+    console.warn(`[Bot] Resetting connection: ${reason}`);
+    stopCurrentBot();
+    scheduleReconnect(baseDelay);
+}
+
+function kickReconnectDelay(reason) {
+    const text = reason.toLowerCase();
+    if (text.includes('too many connections')) return 180000;
+    if (text.includes('already logged')) return 60000;
+    if (text.includes('verify your connection') || text.includes('verification')) return 300000;
+    if (text.includes('timeout') || text.includes('timed out')) return 30000;
+    return 15000;
+}
 
 // ─── Bot creation ───────────────────────────────────────────────────────────────
 function createBot() {
-  // Clean up any existing bot instance first
-  if (currentBot) {
-    try {
-      currentBot.removeAllListeners();
-      currentBot.end();
-    } catch (_) {}
-    currentBot = null;
-  }
-
-  botReady = false;
-  isNavigating = false;
+    if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+    }
+    stopCurrentBot();
+    botReady = false;
+    isNavigating = false;
 
   const botOptions = {
     host:     CONFIG.host,
@@ -111,7 +173,7 @@ function createBot() {
     username: CONFIG.username,
     auth:     CONFIG.auth,
     version:  CONFIG.version,
-    checkTimeoutInterval: 120 * 1000, // 2 minutes tolerance for proxy latency spikes
+    checkTimeoutInterval: 90000,
   };
 
   if (CONFIG.socks5Proxy) {
@@ -135,6 +197,7 @@ function createBot() {
               host: dest.host,
               port: dest.port,
             },
+            timeout: 15000,
           }, (err, info) => {
             if (err) {
               console.error('[Proxy Error]', err.message);
@@ -154,36 +217,38 @@ function createBot() {
 
   const bot = mineflayer.createBot(botOptions);
   currentBot = bot;
+  lastPacketAt = Date.now();
 
-  // ── Anti-AFK & Heartbeat (prevents proxy idle timeout and server AFK kicks) ────
-  const heartbeatTimer = setInterval(() => {
-    if (!bot || !bot.entity || !bot._client || bot._client.ended) return;
+  bot._client.on('packet', () => {
+    if (currentBot === bot) lastPacketAt = Date.now();
+  });
+
+  heartbeatTimer = setInterval(() => {
+    if (currentBot !== bot || !botReady || !bot.entity || !bot._client || bot._client.ended) return;
     try {
-      // 1. Slightly adjust view angle
-      const yaw = bot.entity.yaw + (Math.random() * 0.1 - 0.05);
+      const yaw = bot.entity.yaw + (Math.random() * 0.08 - 0.04);
       bot.look(yaw, bot.entity.pitch, true);
-
-      // 2. Sneak briefly to emit PlayerAction packet
-      bot.setControlState('sneak', true);
-      setTimeout(() => {
-        try { if (bot.entity) bot.setControlState('sneak', false); } catch (_) {}
-      }, 300);
-
-      // 3. Swing arm occasionally
-      if (Math.random() < 0.4) {
-        bot.swingArm('right');
-      }
     } catch (_) {}
+  }, 30000);
+
+  watchdogTimer = setInterval(() => {
+    if (currentBot !== bot || !bot._client || bot._client.ended) return;
+    const stalledFor = Date.now() - lastPacketAt;
+    if (stalledFor > PACKET_STALL_MS) forceReconnect(bot, `no packets for ${Math.round(stalledFor / 1000)}s`, 30000);
   }, 15000);
 
-  // ── Events ────────────────────────────────────────────────────────────────────
+  readyTimer = setTimeout(() => {
+    if (currentBot === bot && !botReady) forceReconnect(bot, 'ready timeout', 30000);
+  }, READY_TIMEOUT_MS);
+
   bot.on('login', () => {
+    lastPacketAt = Date.now();
     console.log(`[Bot] Connected as ${bot.username}`);
   });
 
   bot.on('error', err => {
     console.error('[Bot] Error:', err.message);
-    scheduleReconnect(60_000);
+    forceReconnect(bot, `error: ${err.message}`, 30000);
   });
 
   let isBanned = false;
@@ -193,20 +258,21 @@ function createBot() {
     const reasonStr = typeof reason === 'string' ? reason : JSON.stringify(reason);
     if (reasonStr.toLowerCase().includes('banned')) {
       isBanned = true;
+      clearBotTimers();
       console.error('[Bot] Account is banned on this server. Will NOT reconnect.');
       return;
     }
-    scheduleReconnect();
+    forceReconnect(bot, 'kicked', kickReconnectDelay(reasonStr));
   });
 
   bot.on('end', () => {
-    clearInterval(heartbeatTimer);
-    console.log('[Bot] Connection ended.');
+    if (currentBot !== bot) return;
+    clearBotTimers();
+    currentBot = null;
     botReady = false;
     isNavigating = false;
-    if (!isBanned) {
-      scheduleReconnect();
-    }
+    console.log('[Bot] Connection ended.');
+    if (!isBanned) scheduleReconnect(15000);
   });
 
   // ── Login sequence ────────────────────────────────────────────────────────────
@@ -297,114 +363,100 @@ function isInBedwars(bot) {
   return hasLobbySelector && !hasServerSelector;
 }
 
-async function runLoginSequence(bot) {
-  if (isNavigating) {
-    console.log('[Nav] Navigation already in progress, skipping duplicate call.');
-    return;
-  }
-  if (!bot || !bot._client || bot._client.ended) {
-    console.log('[Nav] Bot not connected, aborting navigation.');
-    return;
-  }
+function isBotConnected(bot) {
+  return currentBot === bot && bot && bot._client && !bot._client.ended;
+}
 
+async function openMenu(bot, slot, label) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    if (!isBotConnected(bot)) throw new Error('Bot disconnected');
+    if (bot.currentWindow) {
+      try { bot.closeWindow(bot.currentWindow); } catch (_) {}
+      await sleep(400);
+    }
+    bot.setQuickBarSlot(slot);
+    await sleep(700);
+    bot.activateItem();
+    bot.swingArm('right');
+    try {
+      return await waitForWindow(bot, 15000);
+    } catch (err) {
+      lastError = err;
+      if (attempt < 2) {
+        console.warn(`[Nav] ${label} did not open, retrying activation…`);
+        await sleep(2000);
+      }
+    }
+  }
+  throw lastError || new Error(`${label} did not open`);
+}
+
+async function runLoginSequence(bot) {
+  if (isNavigating) return;
+  if (!isBotConnected(bot)) return;
   isNavigating = true;
 
   try {
     await sleep(2000);
-    if (!bot || !bot._client || bot._client.ended) return;
-
-    // Send /login
+    if (!isBotConnected(bot)) return;
     console.log('[Login] Sending /login <password>…');
     bot.chat(`/login ${CONFIG.serverPassword}`);
     await sleep(2500);
 
-    // Check if we need to navigate through Hub or if we are already in BedWars
-    if (!isInBedwars(bot)) {
-      if (bot.currentWindow) {
-        try { bot.closeWindow(bot.currentWindow); } catch (_) {}
+    for (let attempt = 1; attempt <= MAX_NAV_ATTEMPTS; attempt++) {
+      try {
+        if (!isBotConnected(bot)) return;
+
+        if (!isInBedwars(bot)) {
+          const selectorSlot = findHotbarSlot(bot, ['compass', 'server']) ?? 4;
+          console.log(`[Nav] Opening Server Selector (slot index ${selectorSlot})…`);
+          const window = await openMenu(bot, selectorSlot, 'Server Selector');
+          console.log(`[Nav] Server Selector opened: "${window.title}" (${window.slots.length} slots)`);
+          await sleep(500);
+          bot.clickWindow(30, 0, 0);
+          await sleep(4500);
+          if (bot.currentWindow) {
+            try { bot.closeWindow(bot.currentWindow); } catch (_) {}
+          }
+          await sleep(2500);
+        }
+
+        if (!isBotConnected(bot)) return;
+        const lobbySlot = findHotbarSlot(bot, ['nether_star', 'lobby']) ?? 6;
+        console.log(`[Nav] Opening Lobby Selector (slot index ${lobbySlot})…`);
+        const lobbyWindow = await openMenu(bot, lobbySlot, 'Lobby Selector');
+        console.log(`[Nav] Lobby Selector opened: "${lobbyWindow.title}" (${lobbyWindow.slots.length} slots)`);
         await sleep(500);
+        bot.clickWindow(10, 0, 0);
+        await sleep(3500);
+        if (bot.currentWindow) {
+          try { bot.closeWindow(bot.currentWindow); } catch (_) {}
+        }
+
+        if (!isBotConnected(bot)) return;
+        botReady = true;
+        reconnectFailures = 0;
+        lastPacketAt = Date.now();
+        if (readyTimer) {
+          clearTimeout(readyTimer);
+          readyTimer = null;
+        }
+        console.log('[Nav] ✅ Joined BedWars Lobby-1! Bot is ready.');
+        return;
+      } catch (err) {
+        console.error(`[Nav] ❌ Attempt ${attempt}/${MAX_NAV_ATTEMPTS} failed:`, err.message);
+        if (!isBotConnected(bot)) return;
+        if (bot.currentWindow) {
+          try { bot.closeWindow(bot.currentWindow); } catch (_) {}
+        }
+        if (attempt < MAX_NAV_ATTEMPTS) await sleep(5000 * attempt);
       }
-
-      const selectorSlot = findHotbarSlot(bot, ['compass', 'server']) ?? 4;
-      console.log(`[Nav] Switching to Server Selector (slot index ${selectorSlot})…`);
-      bot.setQuickBarSlot(selectorSlot);
-      await sleep(600);
-
-      console.log('[Nav] Activating Server Selector…');
-      bot.activateItem();
-      bot.swingArm('right');
-
-      console.log('[Nav] Waiting for Server Selector menu…');
-      const window = await waitForWindow(bot, 10000);
-      console.log(`[Nav] Server Selector opened: "${window.title}" (${window.slots.length} slots)`);
-
-      // Click slot [4,4] (row 4, col 4) = slot 30 (BedWars)
-      const slotIndex = 30;
-      console.log(`[Nav] Clicking slot ${slotIndex} (row 4, col 4) for BedWars…`);
-      await sleep(500);
-      bot.clickWindow(slotIndex, 0, 0);
-
-      await sleep(3500);
-      if (bot.currentWindow) {
-        try { bot.closeWindow(bot.currentWindow); } catch (_) {}
-      }
-      console.log('[Nav] Joined BedWars lobby! Waiting for world to settle…');
-      await sleep(4000);
-    } else {
-      console.log('[Nav] Already in BedWars! Skipping Hub selector.');
     }
 
-    if (!bot || !bot._client || bot._client.ended) return;
-
-    // ── Navigate to Lobby-1: Hotbar slot 7 -> open menu -> click [2,2] ──
-    if (bot.currentWindow) {
-      try { bot.closeWindow(bot.currentWindow); } catch (_) {}
-      await sleep(500);
-    }
-
-    const lobbySlot = findHotbarSlot(bot, ['nether_star', 'lobby']) ?? 6;
-    console.log(`[Nav] Switching to Lobby Selector (slot index ${lobbySlot})…`);
-    bot.setQuickBarSlot(lobbySlot);
-    await sleep(600);
-
-    console.log('[Nav] Activating Lobby Selector…');
-    bot.activateItem();
-    bot.swingArm('right');
-
-    console.log('[Nav] Waiting for Lobby Selector menu…');
-    const lobbyWindow = await waitForWindow(bot, 10000);
-    console.log(`[Nav] Lobby Selector opened: "${lobbyWindow.title}" (${lobbyWindow.slots.length} slots)`);
-
-    // Click slot [2,2] (row 2, col 2) = slot 10 (Lobby-1)
-    const lobbySlotIndex = 10;
-    console.log(`[Nav] Clicking slot ${lobbySlotIndex} (row 2, col 2) for Lobby-1…`);
-    await sleep(500);
-    bot.clickWindow(lobbySlotIndex, 0, 0);
-
-    await sleep(3000);
-    if (bot.currentWindow) {
-      try { bot.closeWindow(bot.currentWindow); } catch (_) {}
-    }
-
-    botReady = true;
-    navAttempts = 0;
-    console.log('[Nav] ✅ Joined BedWars Lobby-1! Bot is ready.');
-  } catch (err) {
-    console.error('[Nav] ❌ Navigation failed:', err.message);
-    if (!bot || !bot._client || bot._client.ended) return;
-
-    navAttempts++;
-    if (navAttempts <= MAX_NAV_ATTEMPTS) {
-      console.log(`[Nav] Retrying in 6s (attempt ${navAttempts}/${MAX_NAV_ATTEMPTS})…`);
-      await sleep(6000);
-      runLoginSequence(bot);
-    } else {
-      console.warn('[Nav] Max attempts reached, triggering clean bot restart…');
-      navAttempts = 0;
-      bot.end();
-    }
+    forceReconnect(bot, 'navigation failed repeatedly', 30000);
   } finally {
-    isNavigating = false;
+    if (currentBot === bot) isNavigating = false;
   }
 }
 
@@ -468,23 +520,16 @@ function normalizeMode(str) {
   return map[str.toLowerCase()] || null;
 }
 
-function scheduleReconnect(delay = 10_000) {
-  if (reconnectTimer) return;
-  console.log(`[Bot] Reconnecting in ${Math.round(delay / 1000)}s…`);
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    console.log('[Bot] Reconnecting now…');
-    createBot();
-  }, delay);
+// ─── Process-level error protection ─────────────────────────────────────────────
+function fatalExit(label, reason) {
+  const detail = reason instanceof Error ? (reason.stack || reason.message) : String(reason);
+  console.error(`[Process] ${label}:`, detail);
+  stopCurrentBot();
+  setTimeout(() => process.exit(1), 500).unref();
 }
 
-// ─── Process-level error protection ─────────────────────────────────────────────
-process.on('uncaughtException', err => {
-  console.error('[Process] Uncaught Exception:', err.message);
-});
-process.on('unhandledRejection', reason => {
-  console.error('[Process] Unhandled Rejection:', reason);
-});
+process.on('uncaughtException', err => fatalExit('Uncaught Exception', err));
+process.on('unhandledRejection', reason => fatalExit('Unhandled Rejection', reason));
 
 // ─── Start ──────────────────────────────────────────────────────────────────────
 createBot();
