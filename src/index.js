@@ -12,11 +12,11 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 function resolveServer(host, port) {
   return new Promise((resolve) => {
     dns.resolveSrv(`_minecraft._tcp.${host}`, (err, addresses) => {
-      if (!err && addresses && addresses.length > 0) {
-        resolve({ host: addresses[0].name, port: addresses[0].port });
-      } else {
-        resolve({ host, port });
-      }
+      const targetHost = !err && addresses && addresses.length > 0 ? addresses[0].name : host;
+      const targetPort = !err && addresses && addresses.length > 0 ? addresses[0].port : port;
+      dns.lookup(targetHost, { family: 4 }, (lookupErr, address) => {
+        resolve({ host: !lookupErr && address ? address : targetHost, port: targetPort });
+      });
     });
   });
 }
@@ -183,6 +183,7 @@ function createBot() {
 
   bot.on('error', err => {
     console.error('[Bot] Error:', err.message);
+    scheduleReconnect(60_000);
   });
 
   let isBanned = false;
@@ -467,14 +468,14 @@ function normalizeMode(str) {
   return map[str.toLowerCase()] || null;
 }
 
-function scheduleReconnect() {
+function scheduleReconnect(delay = 10_000) {
   if (reconnectTimer) return;
-  console.log('[Bot] Reconnecting in 10s…');
+  console.log(`[Bot] Reconnecting in ${Math.round(delay / 1000)}s…`);
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     console.log('[Bot] Reconnecting now…');
     createBot();
-  }, 10_000);
+  }, delay);
 }
 
 // ─── Process-level error protection ─────────────────────────────────────────────
