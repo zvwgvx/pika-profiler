@@ -85,11 +85,25 @@ const cooldowns = new Map();
 const COOLDOWN_MS = 5000;
 
 // ─── Bot state ──────────────────────────────────────────────────────────────────
-let botReady = false;
+let currentBot = null;
+let reconnectTimer = null;
+let isNavigating = false;
+let navAttempts = 0;
+const MAX_NAV_ATTEMPTS = 3;
 
 // ─── Bot creation ───────────────────────────────────────────────────────────────
 function createBot() {
+  // Clean up any existing bot instance first
+  if (currentBot) {
+    try {
+      currentBot.removeAllListeners();
+      currentBot.end();
+    } catch (_) {}
+    currentBot = null;
+  }
+
   botReady = false;
+  isNavigating = false;
 
   const botOptions = {
     host:     CONFIG.host,
@@ -97,7 +111,7 @@ function createBot() {
     username: CONFIG.username,
     auth:     CONFIG.auth,
     version:  CONFIG.version,
-    checkTimeoutInterval: 60 * 1000,
+    checkTimeoutInterval: 120 * 1000, // 2 minutes tolerance for proxy latency spikes
   };
 
   if (CONFIG.socks5Proxy) {
@@ -127,6 +141,9 @@ function createBot() {
               client.emit('error', err);
               return;
             }
+            // Enable TCP keepalive & disable Nagle to keep proxy NAT socket alive
+            info.socket.setKeepAlive(true, 10000);
+            info.socket.setNoDelay(true);
             client.setSocket(info.socket);
             client.emit('connect');
           });
@@ -136,15 +153,28 @@ function createBot() {
   }
 
   const bot = mineflayer.createBot(botOptions);
+  currentBot = bot;
 
-  // ── Anti-AFK & KeepAlive Heartbeat (keeps proxy socket active) ────────────────
+  // ── Anti-AFK & Heartbeat (prevents proxy idle timeout and server AFK kicks) ────
   const heartbeatTimer = setInterval(() => {
-    if (!botReady || !bot.entity) return;
+    if (!bot || !bot.entity || !bot._client || bot._client.ended) return;
     try {
+      // 1. Slightly adjust view angle
       const yaw = bot.entity.yaw + (Math.random() * 0.1 - 0.05);
       bot.look(yaw, bot.entity.pitch, true);
+
+      // 2. Sneak briefly to emit PlayerAction packet
+      bot.setControlState('sneak', true);
+      setTimeout(() => {
+        try { if (bot.entity) bot.setControlState('sneak', false); } catch (_) {}
+      }, 300);
+
+      // 3. Swing arm occasionally
+      if (Math.random() < 0.4) {
+        bot.swingArm('right');
+      }
     } catch (_) {}
-  }, 20000);
+  }, 15000);
 
   // ── Events ────────────────────────────────────────────────────────────────────
   bot.on('login', () => {
@@ -172,6 +202,7 @@ function createBot() {
     clearInterval(heartbeatTimer);
     console.log('[Bot] Connection ended.');
     botReady = false;
+    isNavigating = false;
     if (!isBanned) {
       scheduleReconnect();
     }
@@ -242,97 +273,137 @@ function createBot() {
   return bot;
 }
 
-// 1. Wait for spawn
-// 2. Switch to hotbar Server Selector → RMB → click BedWars in menu
-// 3. Bot is ready
+// ─── Helpers: Inventory & Navigation ───────────────────────────────────────────
+
+function findHotbarSlot(bot, keywords) {
+  for (let slot = 36; slot <= 44; slot++) {
+    const item = bot.inventory?.slots?.[slot];
+    if (!item) continue;
+    const name = (item.name || '').toLowerCase();
+    const displayName = (item.displayName || '').toLowerCase();
+    for (const kw of keywords) {
+      if (name.includes(kw) || displayName.includes(kw)) {
+        return slot - 36; // 0-based quickbar slot
+      }
+    }
+  }
+  return null;
+}
+
+function isInBedwars(bot) {
+  const hasLobbySelector = findHotbarSlot(bot, ['nether_star', 'lobby']) !== null;
+  const hasServerSelector = findHotbarSlot(bot, ['server']) !== null;
+  return hasLobbySelector && !hasServerSelector;
+}
 
 async function runLoginSequence(bot) {
+  if (isNavigating) {
+    console.log('[Nav] Navigation already in progress, skipping duplicate call.');
+    return;
+  }
+  if (!bot || !bot._client || bot._client.ended) {
+    console.log('[Nav] Bot not connected, aborting navigation.');
+    return;
+  }
+
+  isNavigating = true;
+
   try {
     await sleep(2000);
+    if (!bot || !bot._client || bot._client.ended) return;
 
     // Send /login
     console.log('[Login] Sending /login <password>…');
     bot.chat(`/login ${CONFIG.serverPassword}`);
-
     await sleep(2500);
 
-    // Switch to hotbar slot 5 (Server Selector) and right-click
-    console.log('[Nav] Switching to hotbar slot 5 (Server Selector)…');
-    bot.setQuickBarSlot(4); // slot 5 = index 4 (0-based)
-
-    await sleep(500);
-    console.log('[Nav] Right-clicking Server Selector…');
-    bot.activateItem();
-
-    // Wait for menu window to open
-    console.log('[Nav] Waiting for menu window…');
-    const window = await waitForWindow(bot, 10000);
-    console.log(`[Nav] Window opened: "${window.title}" (${window.slots.length} slots)`);
-
-    // Log all slots so we can see what's in the menu
-    for (let i = 0; i < window.slots.length; i++) {
-      const slot = window.slots[i];
-      if (slot) {
-        console.log(`[Nav] Slot ${i}: ${slot.name} - "${slot.displayName}"`);
+    // Check if we need to navigate through Hub or if we are already in BedWars
+    if (!isInBedwars(bot)) {
+      if (bot.currentWindow) {
+        try { bot.closeWindow(bot.currentWindow); } catch (_) {}
+        await sleep(500);
       }
+
+      const selectorSlot = findHotbarSlot(bot, ['compass', 'server']) ?? 4;
+      console.log(`[Nav] Switching to Server Selector (slot index ${selectorSlot})…`);
+      bot.setQuickBarSlot(selectorSlot);
+      await sleep(600);
+
+      console.log('[Nav] Activating Server Selector…');
+      bot.activateItem();
+      bot.swingArm('right');
+
+      console.log('[Nav] Waiting for Server Selector menu…');
+      const window = await waitForWindow(bot, 10000);
+      console.log(`[Nav] Server Selector opened: "${window.title}" (${window.slots.length} slots)`);
+
+      // Click slot [4,4] (row 4, col 4) = slot 30 (BedWars)
+      const slotIndex = 30;
+      console.log(`[Nav] Clicking slot ${slotIndex} (row 4, col 4) for BedWars…`);
+      await sleep(500);
+      bot.clickWindow(slotIndex, 0, 0);
+
+      await sleep(3500);
+      if (bot.currentWindow) {
+        try { bot.closeWindow(bot.currentWindow); } catch (_) {}
+      }
+      console.log('[Nav] Joined BedWars lobby! Waiting for world to settle…');
+      await sleep(4000);
+    } else {
+      console.log('[Nav] Already in BedWars! Skipping Hub selector.');
     }
 
-    // Click slot [4,4] (row 4, col 4) = (4-1)*9 + (4-1) = 30
-    const slotIndex = (4 - 1) * 9 + (4 - 1); // = 30
-    console.log(`[Nav] Clicking slot ${slotIndex} (row 4, col 4)…`);
-    await sleep(500);
-    bot.clickWindow(slotIndex, 0, 0);
-
-    await sleep(3000);
-
-    // Close window if still open
-    if (bot.currentWindow) {
-      bot.closeWindow(bot.currentWindow);
-    }
-
-    console.log('[Nav] Joined BedWars lobby! Waiting for world to settle…');
-    await sleep(4000);
+    if (!bot || !bot._client || bot._client.ended) return;
 
     // ── Navigate to Lobby-1: Hotbar slot 7 -> open menu -> click [2,2] ──
-    console.log('[Nav] Switching to hotbar slot 7 (Lobby Selector)…');
-    bot.setQuickBarSlot(6); // slot 7 = index 6 (0-based)
+    if (bot.currentWindow) {
+      try { bot.closeWindow(bot.currentWindow); } catch (_) {}
+      await sleep(500);
+    }
 
-    await sleep(500);
-    console.log('[Nav] Activating hotbar slot 7…');
-    bot.swingArm('right');
+    const lobbySlot = findHotbarSlot(bot, ['nether_star', 'lobby']) ?? 6;
+    console.log(`[Nav] Switching to Lobby Selector (slot index ${lobbySlot})…`);
+    bot.setQuickBarSlot(lobbySlot);
+    await sleep(600);
+
+    console.log('[Nav] Activating Lobby Selector…');
     bot.activateItem();
+    bot.swingArm('right');
 
-    // Wait for Lobby Selector window to open
     console.log('[Nav] Waiting for Lobby Selector menu…');
     const lobbyWindow = await waitForWindow(bot, 10000);
     console.log(`[Nav] Lobby Selector opened: "${lobbyWindow.title}" (${lobbyWindow.slots.length} slots)`);
 
-    for (let i = 0; i < lobbyWindow.slots.length; i++) {
-      const slot = lobbyWindow.slots[i];
-      if (slot) {
-        console.log(`[Nav] Lobby Slot ${i}: ${slot.name} - "${slot.displayName}"`);
-      }
-    }
-
-    // Click slot [2,2] (row 2, col 2) = (2 - 1) * 9 + (2 - 1) = 10 (Lobby-1)
-    const lobbySlotIndex = (2 - 1) * 9 + (2 - 1); // = 10
+    // Click slot [2,2] (row 2, col 2) = slot 10 (Lobby-1)
+    const lobbySlotIndex = 10;
     console.log(`[Nav] Clicking slot ${lobbySlotIndex} (row 2, col 2) for Lobby-1…`);
     await sleep(500);
     bot.clickWindow(lobbySlotIndex, 0, 0);
 
     await sleep(3000);
-
     if (bot.currentWindow) {
-      bot.closeWindow(bot.currentWindow);
+      try { bot.closeWindow(bot.currentWindow); } catch (_) {}
     }
 
     botReady = true;
+    navAttempts = 0;
     console.log('[Nav] ✅ Joined BedWars Lobby-1! Bot is ready.');
   } catch (err) {
     console.error('[Nav] ❌ Navigation failed:', err.message);
-    console.log('[Nav] Retrying in 5s…');
-    await sleep(5000);
-    runLoginSequence(bot);
+    if (!bot || !bot._client || bot._client.ended) return;
+
+    navAttempts++;
+    if (navAttempts <= MAX_NAV_ATTEMPTS) {
+      console.log(`[Nav] Retrying in 6s (attempt ${navAttempts}/${MAX_NAV_ATTEMPTS})…`);
+      await sleep(6000);
+      runLoginSequence(bot);
+    } else {
+      console.warn('[Nav] Max attempts reached, triggering clean bot restart…');
+      navAttempts = 0;
+      bot.end();
+    }
+  } finally {
+    isNavigating = false;
   }
 }
 
@@ -340,13 +411,28 @@ async function runLoginSequence(bot) {
  * Wait for a window (chest/menu) to open
  */
 function waitForWindow(bot, timeout = 10000) {
+  // If window is ALREADY open, return it immediately
+  if (bot.currentWindow) {
+    return Promise.resolve(bot.currentWindow);
+  }
+
   return new Promise((resolve, reject) => {
+    let resolved = false;
+
     const timer = setTimeout(() => {
       bot.removeListener('windowOpen', onOpen);
-      reject(new Error(`Window did not open within ${timeout}ms`));
+      if (!resolved) {
+        if (bot.currentWindow) {
+          resolve(bot.currentWindow);
+        } else {
+          reject(new Error(`Window did not open within ${timeout}ms`));
+        }
+      }
     }, timeout);
 
     function onOpen(window) {
+      if (resolved) return;
+      resolved = true;
       clearTimeout(timer);
       resolve(window);
     }
@@ -381,15 +467,24 @@ function normalizeMode(str) {
   return map[str.toLowerCase()] || null;
 }
 
-let reconnectTimer = null;
 function scheduleReconnect() {
   if (reconnectTimer) return;
+  console.log('[Bot] Reconnecting in 10s…');
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
-    console.log('[Bot] Reconnecting…');
+    console.log('[Bot] Reconnecting now…');
     createBot();
   }, 10_000);
 }
 
+// ─── Process-level error protection ─────────────────────────────────────────────
+process.on('uncaughtException', err => {
+  console.error('[Process] Uncaught Exception:', err.message);
+});
+process.on('unhandledRejection', reason => {
+  console.error('[Process] Unhandled Rejection:', reason);
+});
+
 // ─── Start ──────────────────────────────────────────────────────────────────────
 createBot();
+
