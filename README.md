@@ -63,16 +63,6 @@ Output:
 Notch | Doubles Weekly | W: 15 WLR: 7.50 | K: 66 KDR: 4.71 | FK: 64 FKDR: 32.00
 ```
 
-## Roadmap
-
-- [x] BedWars stats checker
-- [x] API key auth
-- [x] Rank colors
-- [x] Case-insensitive lookup
-- [x] SOCKS5 proxy
-- [ ] Denicker
-- [ ] Alt detector
-
 ## License
 
 MIT.
