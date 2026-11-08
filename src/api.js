@@ -1,21 +1,92 @@
+require('dotenv').config();
 const fetch = require('node-fetch');
 
-const BASE_URL = 'https://stats.pika-network.net/api';
+const DEFAULT_BASE_URL = 'https://stats.pika-network.net/api';
+
+/**
+ * Pika's stats API is authenticated: every request must carry a key in the
+ * `X-Api-Key` header. Keys are issued in-game with `/apikey` and can be
+ * revoked from the same command.
+ */
+function getApiKey() {
+  return (process.env.PIKA_API_KEY || '').trim();
+}
+
+function getBaseUrl() {
+  return (process.env.PIKA_API_BASE_URL || DEFAULT_BASE_URL).replace(/\/+$/, '');
+}
+
+/**
+ * Build request headers (API key and defaults).
+ */
+function buildHeaders() {
+  const headers = {
+    'User-Agent': 'PikaStatBot/1.0',
+    'Accept': 'application/json',
+  };
+  const key = getApiKey();
+  if (key) headers['X-Api-Key'] = key;
+  return headers;
+}
+
+/**
+ * Perform an authenticated API request.
+ * Throws API_KEY_MISSING, API_KEY_INVALID or RATE_LIMITED so the caller can
+ * react to them; any other error status is left to the caller.
+ */
+async function apiRequest(path) {
+  if (!getApiKey()) {
+    throw new Error('API_KEY_MISSING');
+  }
+
+  const res = await fetch(`${getBaseUrl()}${path}`, { headers: buildHeaders() });
+
+  if (res.status === 401) {
+    throw new Error('API_KEY_INVALID');
+  }
+  if (res.status === 429) {
+    throw new Error('RATE_LIMITED');
+  }
+
+  // Warn when the quota is nearly exhausted (limit is 120 requests / window)
+  const remaining = res.headers.get('x-ratelimit-remaining');
+  if (remaining !== null && Number(remaining) <= 10) {
+    console.warn(`[API] Rate limit running low: ${remaining}/${res.headers.get('x-ratelimit-limit')} left`);
+  }
+
+  return res;
+}
+
+// Mode mapping
+// The API only accepts these mode identifiers. The quads mode is named
+// "QUAD" (singular); a raw "QUADS" request is rejected with a 400.
+const MODE_ALIASES = {
+  ALL_MODES: 'ALL_MODES',
+  SOLO: 'SOLO',
+  DOUBLES: 'DOUBLES',
+  QUAD: 'QUAD',
+  QUADS: 'QUAD',
+};
+
+function normalizeApiMode(mode) {
+  const key = String(mode || 'ALL_MODES').toUpperCase();
+  return MODE_ALIASES[key] || key;
+}
 
 /**
  * Fetch Bedwars leaderboard stats for a player
  * @param {string} username
- * @param {string} interval - total | monthly | weekly
- * @param {string} mode - ALL_MODES | SOLO | DOUBLES | TRIPLES | QUADS
+ * @param {string} interval - total | monthly | weekly | yearly
+ * @param {string} mode - ALL_MODES | SOLO | DOUBLES | QUAD
  */
 async function getBedwarsStats(username, interval = 'total', mode = 'ALL_MODES') {
-  const url = `${BASE_URL}/profile/${encodeURIComponent(username)}/leaderboard?type=bedwars&interval=${interval}&mode=${mode}`;
-  const res = await fetch(url, {
-    headers: { 'User-Agent': 'PikaStatBot/1.0' }
-  });
+  const url =
+    `/profile/${encodeURIComponent(username)}/leaderboard` +
+    `?type=bedwars&interval=${encodeURIComponent(interval)}&mode=${encodeURIComponent(normalizeApiMode(mode))}`;
+
+  const res = await apiRequest(url);
 
   if (res.status === 404 || res.status === 204) return null; // player not found or no stats
-  if (res.status === 429) throw new Error('RATE_LIMITED');
   if (!res.ok) throw new Error(`API error: ${res.status}`);
 
   return res.json();
@@ -41,14 +112,12 @@ async function fetchPlayerStats(username, interval = 'total', mode = 'ALL_MODES'
 }
 
 /**
- * Fetch basic player profile (rank, level, guild…)
+ * Fetch basic player profile (rank, level, guild information).
  * @param {string} username
  */
 async function getProfile(username) {
-  const url = `${BASE_URL}/profile/${encodeURIComponent(username)}`;
-  const res = await fetch(url, {
-    headers: { 'User-Agent': 'PikaStatBot/1.0' }
-  });
+  const url = `/profile/${encodeURIComponent(username)}`;
+  const res = await apiRequest(url);
 
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(`API error: ${res.status}`);
@@ -66,7 +135,7 @@ function getStat(data, key) {
   return data[key].entries?.[0]?.value ?? 0;
 }
 
-// ─── Color palette (&#RRGGBB) ────────────────────────────────────────────────────
+// Color palette (&#RRGGBB)
 const C = {
   GOLD:   '&#FFB800',
   CYAN:   '&#00FFCC',
@@ -79,7 +148,7 @@ const C = {
   RESET:  '',
 };
 
-// ─── Rank colors for player names ───────────────────────────────────────────────
+// Rank colors for player names
 const RANK_CONFIG = {
   owner:     { priority: 150, color: '&#FF5555' }, // red
   admin:     { priority: 140, color: '&#FF5555' }, // red
@@ -150,7 +219,7 @@ function formatBedwarsStats(username, data, interval, mode, profile = null) {
   // Build tag: only show mode/interval when not default
   const tags = [];
   if (mode !== 'ALL_MODES') {
-    const modeLabels = { SOLO: 'Solo', DOUBLES: 'Doubles', QUADS: 'Quads' };
+    const modeLabels = { SOLO: 'Solo', DOUBLES: 'Doubles', QUAD: 'Quads', QUADS: 'Quads' };
     tags.push(modeLabels[mode] || mode);
   }
   if (interval !== 'total') {
@@ -170,4 +239,11 @@ function formatBedwarsStats(username, data, interval, mode, profile = null) {
   );
 }
 
-module.exports = { getBedwarsStats, getProfile, fetchPlayerStats, getPlayerRankColor, formatBedwarsStats };
+module.exports = {
+  getBedwarsStats,
+  getProfile,
+  fetchPlayerStats,
+  getPlayerRankColor,
+  formatBedwarsStats,
+  normalizeApiMode,
+};

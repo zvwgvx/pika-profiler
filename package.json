@@ -1,7 +1,7 @@
 {
   "name": "pika-profiler",
   "version": "1.0.0",
-  "description": "Minecraft in-game stats and player intelligence bot for Pika-Network",
+  "description": "BedWars stats bot for PikaNetwork",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",

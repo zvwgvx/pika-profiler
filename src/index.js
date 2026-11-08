@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const { fetchPlayerStats, formatBedwarsStats } = require('./api');
 
-// ─── Utility: sleep & dns resolve ───────────────────────────────────────────────
+// Utility functions
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 function resolveServer(host, port) {
@@ -21,7 +21,7 @@ function resolveServer(host, port) {
   });
 }
 
-// ─── Config ─────────────────────────────────────────────────────────────────────
+// Configuration
 const CONFIG = {
   host:     process.env.MC_HOST     || 'play.pika-network.net',
   port:     parseInt(process.env.MC_PORT || '25565'),
@@ -33,6 +33,7 @@ const CONFIG = {
   defaultInterval: process.env.DEFAULT_INTERVAL || 'total',
   defaultMode:     process.env.DEFAULT_MODE     || 'ALL_MODES',
   socks5Proxy:     process.env.SOCKS5_PROXY || process.env.PROXY || '',
+  apiKey:          process.env.PIKA_API_KEY || '',
 };
 
 if (!CONFIG.username) {
@@ -41,6 +42,11 @@ if (!CONFIG.username) {
 }
 if (!CONFIG.serverPassword) {
   console.error('[ERROR] SERVER_PASSWORD is not set in .env');
+  process.exit(1);
+}
+if (!CONFIG.apiKey) {
+  console.error('[ERROR] PIKA_API_KEY is not set in .env');
+  console.error('        Get a key in-game with /apikey and add it to your .env file.');
   process.exit(1);
 }
 
@@ -70,7 +76,7 @@ function parseProxy(proxyStr) {
   return null;
 }
 
-// ─── Chat log file ──────────────────────────────────────────────────────────────
+// Chat log file
 const LOG_FILE = path.join(__dirname, '..', 'chat.log');
 
 function logChat(raw, json) {
@@ -80,11 +86,11 @@ function logChat(raw, json) {
   console.log(`[Chat] ${raw}`);
 }
 
-// ─── Cooldown map ───────────────────────────────────────────────────────────────
+// Command cooldowns
 const cooldowns = new Map();
 const COOLDOWN_MS = 5000;
 
-// ─── Bot state ──────────────────────────────────────────────────────────────────
+// Bot state
 let currentBot = null;
 let reconnectTimer = null;
 let isNavigating = false;
@@ -133,10 +139,10 @@ function scheduleReconnect(baseDelay = MIN_RECONNECT_MS) {
     if (reconnectTimer) return;
     const delay = reconnectDelay(baseDelay);
     reconnectFailures++;
-    console.log(`[Bot] Reconnecting in ${Math.round(delay / 1000)}s…`);
+    console.log(`[Bot] Reconnecting in ${Math.round(delay / 1000)}s`);
     reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
-        console.log('[Bot] Reconnecting now…');
+        console.log('[Bot] Reconnecting now');
         createBot();
     }, delay);
 }
@@ -157,7 +163,7 @@ function kickReconnectDelay(reason) {
     return 15000;
 }
 
-// ─── Bot creation ───────────────────────────────────────────────────────────────
+// Bot creation
 function createBot() {
     if (reconnectTimer) {
         clearTimeout(reconnectTimer);
@@ -204,7 +210,7 @@ function createBot() {
               client.emit('error', err);
               return;
             }
-            // Enable TCP keepalive & disable Nagle to keep proxy NAT socket alive
+            // Enable TCP keepalive and disable Nagle to keep the proxied socket alive
             info.socket.setKeepAlive(true, 10000);
             info.socket.setNoDelay(true);
             client.setSocket(info.socket);
@@ -275,21 +281,21 @@ function createBot() {
     if (!isBanned) scheduleReconnect(15000);
   });
 
-  // ── Login sequence ────────────────────────────────────────────────────────────
+  // Login sequence
   bot.once('spawn', () => {
-    console.log('[Bot] Spawned, starting login…');
+    console.log('[Bot] Spawned, running login sequence');
     runLoginSequence(bot);
   });
 
-  // ── Chat listener (logs ALL messages + handles commands) ──────────────────────
+  // Chat listener: logs every message and handles commands
   bot.on('message', async (jsonMsg, position) => {
     const raw = jsonMsg.toString();
     const json = jsonMsg.json ?? jsonMsg;
 
-    // Log every single message to chat.log
+    // Log every message to chat.log
     logChat(raw, json);
 
-    // Don't process commands until ready
+    // Ignore commands until the bot is ready
     if (!botReady) return;
 
     // Guild chat format: "Guilds ▏ <Rank> Username: msg" or "Guilds ▏ Username: msg"
@@ -306,7 +312,7 @@ function createBot() {
 
     if (cmd !== 'stat') return;
 
-    // ── Cooldown ─────────────────────────────────────────────────────
+    // Cooldown
     const now = Date.now();
     const lastUsed = cooldowns.get(sender) || 0;
     if (now - lastUsed < COOLDOWN_MS) {
@@ -316,7 +322,7 @@ function createBot() {
     }
     cooldowns.set(sender, now);
 
-    // ── Parse: .stat <username> [mode] [interval] ────────────────────
+    // Parse: .stat <username> [mode] [interval]
     const target   = args[1] || sender;
     const mode     = normalizeMode(args[2])     || CONFIG.defaultMode;
     const interval = normalizeInterval(args[3]) || CONFIG.defaultInterval;
@@ -330,6 +336,9 @@ function createBot() {
     } catch (err) {
       if (err.message === 'RATE_LIMITED') {
         sendGuild(bot, 'API rate limited, try again later.');
+      } else if (err.message === 'API_KEY_INVALID' || err.message === 'API_KEY_MISSING') {
+        console.error('[API Error]', err.message);
+        sendGuild(bot, "Bot API key is invalid, please update PIKA_API_KEY.");
       } else {
         console.error('[API Error]', err);
         sendGuild(bot, `Error fetching stats for ${target}.`);
@@ -340,7 +349,7 @@ function createBot() {
   return bot;
 }
 
-// ─── Helpers: Inventory & Navigation ───────────────────────────────────────────
+// Hotbar and navigation helpers
 
 function findHotbarSlot(bot, keywords) {
   for (let slot = 36; slot <= 44; slot++) {
@@ -384,7 +393,7 @@ async function openMenu(bot, slot, label) {
     } catch (err) {
       lastError = err;
       if (attempt < 2) {
-        console.warn(`[Nav] ${label} did not open, retrying activation…`);
+        console.warn(`[Nav] ${label} did not open, retrying activation`);
         await sleep(2000);
       }
     }
@@ -400,7 +409,7 @@ async function runLoginSequence(bot) {
   try {
     await sleep(2000);
     if (!isBotConnected(bot)) return;
-    console.log('[Login] Sending /login <password>…');
+    console.log('[Login] Sending /login <password>');
     bot.chat(`/login ${CONFIG.serverPassword}`);
     await sleep(2500);
 
@@ -410,7 +419,7 @@ async function runLoginSequence(bot) {
 
         if (!isInBedwars(bot)) {
           const selectorSlot = findHotbarSlot(bot, ['compass', 'server']) ?? 4;
-          console.log(`[Nav] Opening Server Selector (slot index ${selectorSlot})…`);
+          console.log(`[Nav] Opening Server Selector (slot index ${selectorSlot})`);
           const window = await openMenu(bot, selectorSlot, 'Server Selector');
           console.log(`[Nav] Server Selector opened: "${window.title}" (${window.slots.length} slots)`);
           await sleep(500);
@@ -424,7 +433,7 @@ async function runLoginSequence(bot) {
 
         if (!isBotConnected(bot)) return;
         const lobbySlot = findHotbarSlot(bot, ['nether_star', 'lobby']) ?? 6;
-        console.log(`[Nav] Opening Lobby Selector (slot index ${lobbySlot})…`);
+        console.log(`[Nav] Opening Lobby Selector (slot index ${lobbySlot})`);
         const lobbyWindow = await openMenu(bot, lobbySlot, 'Lobby Selector');
         console.log(`[Nav] Lobby Selector opened: "${lobbyWindow.title}" (${lobbyWindow.slots.length} slots)`);
         await sleep(500);
@@ -442,10 +451,10 @@ async function runLoginSequence(bot) {
           clearTimeout(readyTimer);
           readyTimer = null;
         }
-        console.log('[Nav] ✅ Joined BedWars Lobby-1! Bot is ready.');
+        console.log('[Nav] Joined BedWars Lobby-1, bot is ready.');
         return;
       } catch (err) {
-        console.error(`[Nav] ❌ Attempt ${attempt}/${MAX_NAV_ATTEMPTS} failed:`, err.message);
+        console.error(`[Nav] Attempt ${attempt}/${MAX_NAV_ATTEMPTS} failed:`, err.message);
         if (!isBotConnected(bot)) return;
         if (bot.currentWindow) {
           try { bot.closeWindow(bot.currentWindow); } catch (_) {}
@@ -464,7 +473,7 @@ async function runLoginSequence(bot) {
  * Wait for a window (chest/menu) to open
  */
 function waitForWindow(bot, timeout = 10000) {
-  // If window is ALREADY open, return it immediately
+  // Return immediately if a window is already open
   if (bot.currentWindow) {
     return Promise.resolve(bot.currentWindow);
   }
@@ -494,7 +503,7 @@ function waitForWindow(bot, timeout = 10000) {
   });
 }
 
-// ─── Helpers ────────────────────────────────────────────────────────────────────
+// Message and argument helpers
 
 function sendGuild(bot, message) {
   bot.chat(`/g c ${message}`);
@@ -515,12 +524,12 @@ function normalizeMode(str) {
   const map = {
     '1': 'SOLO', solo: 'SOLO',
     '2': 'DOUBLES', doubles: 'DOUBLES', double: 'DOUBLES',
-    '4': 'QUADS', quads: 'QUADS', quad: 'QUADS',
+    '4': 'QUAD', quad: 'QUAD', quads: 'QUAD',
   };
   return map[str.toLowerCase()] || null;
 }
 
-// ─── Process-level error protection ─────────────────────────────────────────────
+// Process-level error handling
 function fatalExit(label, reason) {
   const detail = reason instanceof Error ? (reason.stack || reason.message) : String(reason);
   console.error(`[Process] ${label}:`, detail);
@@ -531,6 +540,6 @@ function fatalExit(label, reason) {
 process.on('uncaughtException', err => fatalExit('Uncaught Exception', err));
 process.on('unhandledRejection', reason => fatalExit('Unhandled Rejection', reason));
 
-// ─── Start ──────────────────────────────────────────────────────────────────────
+// Start
 createBot();
 
